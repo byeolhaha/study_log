@@ -37,6 +37,7 @@ public class KafkaProducerConfig {
         //   하지만 지연 시간이 더 발생함
         // 그러나 이 셋 설정에서 컨슈머가 해당 메시지를 받아보는 시간은 동일하다 왜냐하면 ISR에 설장된 복제셋에 모든 메시지가 복제되어야만 컨수머가 읽을 수 있기 때문이다.
         // 다만 이 설정은 그냥 프로듀서가 언제를 성공으로 간주하느냐에 달린 설정인 것 뿐이다.
+        // min.insync.replicas와 헷갈릴 수 있는 이 설정은 브로커 측 설정으로 현재 정상적으로 복제 중인 replica가 몇 개 이상 있어야 메시지 수락할지에 대한 설정이다.
         props.put(ProducerConfig.ACKS_CONFIG, "all");
 
         // 메시지 전달 시간
