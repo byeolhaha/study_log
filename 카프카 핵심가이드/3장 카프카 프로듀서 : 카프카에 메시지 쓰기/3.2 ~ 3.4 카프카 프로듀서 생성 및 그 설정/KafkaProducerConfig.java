@@ -51,6 +51,7 @@ public class KafkaProducerConfig {
         // 가장 일반적인 설정은 리더 선출에 대략 30초가 걸리므로 이에 따라 120초로 설정
         props.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 120_000);  // 메시지 전송 완료까지의 최대 시간 (단위: ms)
         // 메세지를 보내고 응답을 받기까지의 시간
+        // ACK를 기다리는 시간
         props.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 30_000);  // 요청에 대한 응답을 기다리는 최대 시간 (단위: ms)
 
         // 현재 배치가 전송하기 전까지 대기하는 시간
