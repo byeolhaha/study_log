@@ -125,6 +125,9 @@ public class KafkaConsumerConfig {
         consumerProps.put(ConsumerConfig.CLIENT_RACK_CONFIG, "rack-1");
 
         // 정적 그룹 아이디 설정
+        // 죽어도 다시 살아날 것을 기대해서 그룹을 떠나지 않는다. -> 다시 살아 돌아오면 기존의 파티션을 할당 받고, 나머지들은 그대로 유지
+        // 하지만 오랫동안 돌아오지 않는 경우 리벨런싱이 일어난다.
+        // 따라서 session.timeout.ms의 값 설정이 중요하다 너무 길면 리벨런싱이 일어나지 않고 너무 짧으며 살아 돌아올 수도 있는데 리벨런싱이 일어나게 된다.
         consumerProps.put(ConsumerConfig.GROUP_INSTANCE_ID_CONFIG, "countryCounter-1");
 
         // 데이터를 읽거나 쓸 때 소켓이 사용하는 TCP의 수신 및 수신 버퍼의 크기를 설정
