@@ -245,7 +245,9 @@ public String readWithOptimisticLock(String key) {
 ```
 
 ## Working With Conditions
+- 프로세스가 모니터 안에서 기다릴 수 있도록 하기 위해서 condition variable을 사용할 수 있다.
+- condition variable은 wait와 signal 연산에 의해서만 접근 가능하다.
 
+  
 Condition 클래스는 스레드가 락을 잡은 상태에서 어떤 조건이 만족될 때까지 기다릴 수 있는 기능을 제공한다.
-
 즉 synchronized
