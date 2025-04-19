@@ -259,4 +259,55 @@ public String readWithOptimisticLock(String key) {
 그래서 멀리서 보면 확장된 모니터라고 보여질 수 있다.
   
 Condition 클래스는 스레드가 락을 잡은 상태에서 어떤 조건이 만족될 때까지 기다릴 수 있는 기능을 제공한다.
-즉 synchronized
+즉 synchronized와 Object의 wait(),notify()와 비슷하지만 ReentrantLock에서 좀 더 유연하게 조건을 나눠서 기다릴 수 있는 도구이다.
+
+
+```java
+
+public class ProducerConsumer {
+
+    private static final int CAPACITY = 5;
+    private final Queue<Integer> buffer = new LinkedList<>();
+
+    private final ReentrantLock lock = new ReentrantLock();
+    private final Condition notFull = lock.newCondition();    // 생산자용 조건 변수
+    private final Condition notEmpty = lock.newCondition();   // 소비자용 조건 변수
+
+    // 생산자
+    public void produce(int value) throws InterruptedException {
+        lock.lock();
+        try {
+            while (buffer.size() == CAPACITY) {
+                System.out.println("Buffer full, producer waiting...");
+                notFull.await();  // 버퍼가 꽉 차면 생산자는 기다림
+            }
+
+            buffer.offer(value);
+            System.out.println("Produced: " + value);
+
+            notEmpty.signal();  // 소비자 하나 깨움
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    // 소비자
+    public int consume() throws InterruptedException {
+        lock.lock();
+        try {
+            while (buffer.isEmpty()) {
+                System.out.println("Buffer empty, consumer waiting...");
+                notEmpty.await();  // 버퍼가 비면 소비자는 기다림
+            }
+
+            int value = buffer.poll();
+            System.out.println("Consumed: " + value);
+
+            notFull.signal();  // 생산자 하나 깨움
+            return value;
+        } finally {
+            lock.unlock();
+        }
+    }
+}
+```
