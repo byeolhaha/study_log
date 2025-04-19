@@ -248,6 +248,15 @@ public String readWithOptimisticLock(String key) {
 - 프로세스가 모니터 안에서 기다릴 수 있도록 하기 위해서 condition variable을 사용할 수 있다.
 - condition variable은 wait와 signal 연산에 의해서만 접근 가능하다.
 
+여기 부분에서 다소 헷갈릴 수 있다.
+일단 모니터는 사용자가 직접 락을 구현하지 않아도 프로그래밍 단에서 락을 구현해주는 것이다.
+세마포어와 같은 추상 자료형은 프로그래머가 직접 구현해야 하며 락을 얻거나 해제하는 순서가 바뀌거나 등등 조작하기에 어려운 점이 존재한다.
+이를 해결해주는 것이 모니터인데
+자바에서는 synchronized를 통해서 이를 제공하며 이와 함께 객체들에 block&wait구조를 제공한다. block&wait구조는 Object의 wait(), notify(), notifyAll()을 통해서 제공한다.
+이것이 자바에서 제공하는 전통적인 방식이며 모니터이다.
+
+그리고 이를 확장한 것인 Reentrant와 Stamped라고 생각이 든다. 이 구조는 객체 자체에 대한 모니터는 없고 명시적으로 락을 걸어야 한다. 하지만 추가적으로 condition variable 기능을 제공한다.
+그래서 멀리서 보면 확장된 모니터라고 보여질 수 있다.
   
 Condition 클래스는 스레드가 락을 잡은 상태에서 어떤 조건이 만족될 때까지 기다릴 수 있는 기능을 제공한다.
 즉 synchronized
