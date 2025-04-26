@@ -122,8 +122,9 @@ uncommited read, commited read, repeatable read, serializable read 총 4가지�
   start transaction; #3
   select * from users where name = '홍길동'; #4
   ```
+
   session 2
-  ``
+  ```
   set session transaction isolation level serializable;#5
   SELECT @@transaction_isolation;  #6
   START TRANSACTION; #7
