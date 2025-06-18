@@ -16,3 +16,59 @@
   - 논블로킹 또는 비동기 IO 사용하기
 
 ## 가상 스레드로 자원 효율 높이기
+- 플랫폼 스레드는 OS와 1:1로 매핑되기 때문에 OS 레벨의 스레드이다. 따라서 cpu 스케줄러에 의해서 관리된다.
+- 가상 스레드는 JVM 스케줄러가 플랫폼 스레드를 어떤 가상 스레드에 매칭시킬 것인지 결정한다.
+- 만약에 네트워크 IO가 있는 작업을 가상 스레드에서 실행한다고 가정했을 때 플랫폼 스레드1은 블로킹이 될 때까지 일을 하다가, 이를 기다리지 않고 다른 작업을 하러 간다. 즉 언마운트된 플랫폼 스레드는 실행 대기 중인 다른 가상 스레드와 연결된다. 그리고 그 블로킹 작업이 완료되면 쉬고 있던 다른 플랫폼 스레드가 이를 이어 받는다.
+- 자바의 경우 플랫폼 스레드는 ForkJoinPool에서 가져오는 거 같다. 이 ForkJoinPool은 전용 스레드풀이 아니기 때문에 모두 공유한다. 따라서 가상스레드를 너무 많은 곳에서 사용하는 경우 경쟁상태가 발생할 거 같다. 그리고 가상 스레드가 플랫폼 스레드에 비해서 메모리를 적게 자치한다고 해도 이 또한 무제한으로 생성하면 메모리를 많이 차지할 것이다. 
+- 이 시점에서 어떻게 컨텍스트 스위칭이 발생하고 인터럽트가 발생하는가? 즉 완료된 시점을 어떻게 알고 다른 플랫폼 스레드에게 컨텍스트를 주는가에 대한 궁금증이 존재했다. 일단 컨텍스트는 JVM 메모리 영역에 저장된다고 한다. 그리고 인터럽트는 epoll 등의 개념을 사용하여 알려준다고 한다. 이 개념은 추후에 더 깊게 들어가봐야할 거 같다.
+- 코드를 통해서 구현해보니 아래와 같이 출력되었다.
+  ```java
+  package com.example.demo.controller;
+
+  import org.springframework.web.bind.annotation.GetMapping;
+  import org.springframework.web.bind.annotation.RestController;
+
+  @RestController
+  public class TomcatVirtualThreadController {
+
+    @GetMapping("/test1")
+    public String test1() throws InterruptedException {
+        String tomcatThreadName = Thread.currentThread().toString();
+        System.out.println("[톰캣 스레드 시작] " + tomcatThreadName);
+
+        for (int i = 0; i < 5; i++) {
+            final int n = i;
+            Thread.startVirtualThread(() -> {
+                System.out.println(n+"번  [가상 스레드 시작] " + Thread.currentThread());
+                try {
+                    Thread.sleep(1000);  // I/O blocking처럼 보이게
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+                System.out.println(n+"번  [가상 스레드 종료] " + Thread.currentThread());
+            });
+        }
+
+        Thread.sleep(3000); // 톰캣 스레드가 죽지 않도록 유지
+        System.out.println("[톰캣 스레드 종료] " + tomcatThreadName);
+        return "ok";
+      }
+  }
+  ```
+  ```
+  [톰캣 스레드 시작] Thread[#63,http-nio-1010-exec-6,5,main]
+  0번  [가상 스레드 시작] VirtualThread[#93]/runnable@ForkJoinPool-1-worker-7
+  1번  [가상 스레드 시작] VirtualThread[#95]/runnable@ForkJoinPool-1-worker-8
+  3번  [가상 스레드 시작] VirtualThread[#97]/runnable@ForkJoinPool-1-worker-8
+  4번  [가상 스레드 시작] VirtualThread[#98]/runnable@ForkJoinPool-1-worker-8
+  2번  [가상 스레드 시작] VirtualThread[#96]/runnable@ForkJoinPool-1-worker-9
+  0번  [가상 스레드 종료] VirtualThread[#93]/runnable@ForkJoinPool-1-worker-11
+  1번  [가상 스레드 종료] VirtualThread[#95]/runnable@ForkJoinPool-1-worker-9
+  4번  [가상 스레드 종료] VirtualThread[#98]/runnable@ForkJoinPool-1-worker-12
+  2번  [가상 스레드 종료] VirtualThread[#96]/runnable@ForkJoinPool-1-worker-8
+  3번  [가상 스레드 종료] VirtualThread[#97]/runnable@ForkJoinPool-1-worker-10
+  [톰캣 스레드 종료] Thread[#63,http-nio-1010-exec-6,5,main]
+  ```
+
+- 책에 따르면 자바 버전에 따라서 위에서 배운 블로킹 작업을 만나 언마운트된 플랫폼 스레드가 대기 중인 가상 스레드의 작업을 실행하지 못하고 기존의 가상 스레드에 의해서 고정되는 상태가 발생할 수 있다고 한다.
+  이는 자바 23 또는 그 이전 버전에서 synchronized로 인해 블로킹되는 경우에 해당된다. 이 외에도 JNI 호출 등 가상 스레드가 플랫폼 스레드에 고정되는 경우가 있는데 가상 스레드가 플랫폼 스레드를 고정시키면 CPU 효율을 높일 수 없다.
