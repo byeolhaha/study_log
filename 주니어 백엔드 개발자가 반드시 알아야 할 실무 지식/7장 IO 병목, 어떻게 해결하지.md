@@ -1,4 +1,4 @@
-## 네트워크 IO와 자원 효율
+ ## 네트워크 IO와 자원 효율
 - 서버는 다양한 구성 요소(DB, 레디스, 외부 API)와 네트워크를 통해서 데이터를 주고받는다.
 - 데이터 입출력이 완료될 때까지 스레드는 아무런 작업도 하지 않은 채 기다린다 이는 CPU가 아무것도 하지 않는 시간이 발생한다는 의미이다.
 - 생각의 발전 1 : 그렇다면 스레드를 많이 만들어서 CPU가 쉬지 못하도록 하자 (요청 당 스레드 방식으로 구현한 서버가 이 방식에 해당된다.)
@@ -96,4 +96,245 @@
 - 가상 스레드의 이점
   - 처리량을 높일 수 있다.
   - 실행속도나 플랫폼 스레드보다 더 빨라지는 것은 아니다.
-   
+
+## 논블로킹 IO 성능 더 높이기
+- 가상 스레드와 고루틴과 같은 경량 스레드를 사용하면 IO 중심 작업을 하는 경우 서버 처리량을 높일 수 있다.
+- 그러나 경량 스레드 자체도 메모리를 사용하고 스케줄링이 필요하다. (일반 OS 스레드보다 작다고 하더라도 메모리 차지하기는 한다. 그리고 경량 스레드는 혼자 작업을 진행하지 못하고 플랫폼 스레드를 사용해야만 하며 IO 작업에 플랫폼 스레드가 대기하지 못하도록 대기하는 다른 경상 스레드를 찾도록 하는 스케줄링이 필요하다)
+- 따라서 사용자가 폭발적으로 증가하면 어느 순간 경량 스레드만으로도 한계에 부딪힐 수 잇다.
+=> 이 때 서버의 IO 구현 방식으로 구조적으로 변경해야 한다. 바로 논블러킹 IO를 사용하는 것이다.
+### 논블로킹IO 동작 개요
+논블러킹 IO는 입출력이 끝날 때까지 스레드가 대기하지 않는다. 
+```
+//channel : SocketChannel, buffer : ByteBuffer
+int byteReads = channel.read(buffer);//데이터를 읽을 때까지 대기하지 않는다.
+```
+- 위 코드 설명
+  - 조회했는지 여부에 상관없이 바로 다음 코드 실행 따라서 데이터를 조회했다는 가정하에 코드를 작성할 수 없다.
+```
+while(true) {
+  //channel : SocketChannel, buffer : ByteBuffer
+  int byteReads = channel.read(buffer);//데이터를 읽을 때까지 대기하지 않는다.
+  if(byteReads > 0) { // 조회 데이터가 있는 경우
+   // 실행한 코드
+  }
+}
+```
+- 위 코드 설명
+  - 데이터를 조해했다는 가정하에 코드를 작성할 수 있다.
+  - 하지만 CPU낭비가 심하다. 읽을 데이터가 없어도 계속 while loop를 돈다.
+
+실제로 논블러킹 IO 사용할 때는 데이터 읽기를 바로 시도하기 보다는 어떤 연산을 수행할 수 있는지 확인하고 해당 연산을 실행한다.
+실행 흐름 요약
+1. 실행 가능한 IO 연산 목록을 구한다. (실행 가능한 연산을 구할 때까지 대기)
+2. 1에서 구한 IO 연산 목록을 차례대로 수행한다.
+  - 각 IO 연산을 처리한다.
+3. 이 과정을 반복한다.
+```
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.*;
+import java.util.Iterator;
+import java.util.Set;
+
+public class NioEchoServer {
+
+    public static void main(String[] args) throws IOException {
+        Selector selector = Selector.open(); // ① Selector 생성
+
+        ServerSocketChannel serverSocketChannel = ServerSocketChannel.open();
+        serverSocketChannel.bind(new InetSocketAddress(5000));
+        serverSocketChannel.configureBlocking(false); // 논블로킹 모드 설정
+        serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT); // ② 연결 수락 이벤트 등록
+
+        System.out.println("📡 NIO Echo 서버 시작 (port: 5000)");
+
+        while (true) {
+            // 1. 실행 가능한 IO 연산 목록을 구한다. (없으면 blocking 상태로 대기)
+            selector.select();
+
+            // 2. 실행 가능한 키(이벤트들)를 가져온다.
+            Set<SelectionKey> selectedKeys = selector.selectedKeys();
+            Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
+
+            // 3. 실행 가능한 IO 연산을 하나씩 처리한다.
+            while (keyIterator.hasNext()) {
+                SelectionKey key = keyIterator.next();
+
+                if (key.isAcceptable()) {
+                    // 클라이언트 연결 수락
+                    ServerSocketChannel server = (ServerSocketChannel) key.channel();
+                    SocketChannel client = server.accept();
+                    client.configureBlocking(false);
+                    client.register(selector, SelectionKey.OP_READ);
+                    System.out.println("클라이언트 연결됨: " + client.getRemoteAddress());
+
+                } else if (key.isReadable()) {
+                    // 클라이언트로부터 데이터 읽기
+                    SocketChannel client = (SocketChannel) key.channel();
+                    ByteBuffer buffer = ByteBuffer.allocate(1024);
+
+                    int bytesRead = client.read(buffer);
+                    if (bytesRead == -1) {
+                        System.out.println("클라이언트 연결 종료");
+                        client.close();
+                    } else {
+                        buffer.flip();
+                        client.write(buffer); // 그대로 echo 응답
+                        buffer.clear();
+                    }
+                }
+
+                // 4. 해당 키는 이제 처리했으니 제거
+                keyIterator.remove();
+            }
+        }
+    }
+}
+
+```
+- 논블로킹 IO를 1개 스레드로 구현하면 동시성이 떨어진다. 1개 채널에 대한 읽기 처리가 끝나야 다음 채널에 대한 읽기 처리를 실행한다. 즉 두 개 채널에 대한 읽기 연산이 가능해도 한번에 1개 채널에 대해서 처리가 가능하다.
+- 논블러킹 IO에서 동시성을 높이기 위해서 사용하는 방법은 채널들을 N개 그룹으로 나누고, 각 그룹마다 스레드를 생성하는 것이다. 보통은 CPU 개수만틈 그룹을 나누고 각 그룹마다 입출력을 처리할 수 있는 스레드를 할당하다. 
+
+
+여기서 이 부분이 헷갈렸다.
+"여기서 실행 가능한 연산을 구할 때까지 대기한다."
+→ 이 말은 Selector.select() 같은 메서드가 I/O 이벤트가 발생할 때까지 블로킹된다는 의미이다.
+→ 하지만 이 블로킹은 단 하나의 스레드가 수천 개의 채널을 감시하기 위한 효율적인 블로킹이며,
+→ 요청 하나당 하나의 스레드가 필요한 전통적인 블로킹 I/O와는 다르다.
+
+
+그래서 아래와 같이 정리해보았다.
+### 가상 스레드와 논블러킹 IO
+가상 스레드(Virtual Thread)
+- 요청 N개 → 가상 스레드 N개 생성 가능
+- 각 가상 스레드는 동기 코드처럼 read(), send() 등 블로킹 I/O 호출을 사용
+- 하지만 I/O 작업 중에는 실제 플랫폼 스레드를 반납(park) → 즉, 자원을 낭비하지 않음
+- 결과적으로 논블로킹 구조만큼 자원 효율적이면서, 동기식 코드 작성이 가능
+  -  장점: 동기 코드의 간결함 + 논블로킹의 자원 효율성
+  -  단점: 내부는 여전히 블로킹 기반이므로 완전한 논블로킹 네트워크 처리에는 적합하지 않을 수 있음
+
+논블로킹 I/O (Selector 기반, Netty, WebFlux 등)
+- 요청 N개 → 스레드는 1~몇 개면 충분
+- 소켓 채널을 모두 Selector에 등록
+- 하나의 스레드가 select()로 I/O 이벤트를 감지하고, 이벤트가 발생한 채널만 처리
+- 진짜로 아무 것도 기다리지 않음. 이벤트가 있을 때만 반응
+  - 장점: 수만 개의 연결도 몇 개의 스레드로 처리 가능
+  - 단점: 코드가 콜백 지옥 or 리액티브 스트림으로 복잡해짐
+
+
+나는 이 두개가 처리량을 언급할 때 항상 같이 언급되었는데 어떤 상황에서 사용해야 하는지 이해하지 못했었다.
+그런데 이제는 정리가 되었다.
+가상 스레드는 플랫폼 스레드는 반납하기 때문에 자원을 효율적으로 사용할 수 있다. 그렇지만 메모리를 많이 차지할 수 있다.
+논블러킹 IO는 IO작업에 대해서 적은 스레드를 사용한다. 하지만 코드가 복잡해진다. 
+
+### 직접 실행한 코드
+그래서 정말 그럴까? 정말 논블러킹 IO가 메모리를 적게 차지하고 정말 적은 수의 스레드를 만들까?
+실제로 인텔리제이 프로파일을 통해서 비교해보았다.
+
+코드는 아래와 같다.
+- ```/test-non-blocking``` : 논블러킹 IO를 이용해서 내부에 있는 /delay API 호출
+- ```/test-virtual-thread``` : 가상 스레드를 이용해서 내부에 있는 /delay API 호출
+- 그리고 이 둘의 API를 같은 부하를 주고 인텔리제이 프로파일로 비교해보자
+
+```java
+@RestController
+@RequiredArgsConstructor
+public class WebClientVsVirtualThreadController {
+
+    private final WebClient webClient = WebClient.builder()
+            .baseUrl("http://localhost:1010")
+            .build();
+
+    // HttpClient를 필드로 한 번만 생성해서 재사용
+    private final HttpClient sharedHttpClient = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_1_1) // HTTP/1.1 강제 설정 (커넥션 재사용 보장)
+            .build();
+
+    @GetMapping("/test-non-blocking")
+    public ResponseEntity<String> testNonBlocking() {
+        for (int i = 0; i < 100; i++) {
+            int finalI = i;
+            webClient.get()
+                    .uri("/delay")
+                    .retrieve()
+                    .bodyToMono(String.class)
+                    .doOnNext(res -> System.out.println("[WebClient] " + finalI + " => " + Thread.currentThread().getName()))
+                    .subscribe();
+        }
+        return ResponseEntity.ok(" WebClient 요청 전송 완료");
+    }
+
+    @GetMapping("/test-virtual-thread")
+    public ResponseEntity<String> testVirtualThread() {
+        var executor = Executors.newThreadPerTaskExecutor(Thread.ofVirtual().factory());
+
+        for (int i = 0; i < 100; i++) {
+            int finalI = i;
+            executor.submit(() -> {
+                try {
+                    HttpRequest request = HttpRequest.newBuilder()
+                            .uri(URI.create("http://localhost:1010/delay"))
+                            .GET()
+                            .build();
+
+                    HttpResponse<String> response = sharedHttpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                    System.out.println("[VirtualThread] " + finalI + " => " + Thread.currentThread());
+                } catch (Exception e) {
+                    System.err.println("[ 오류 발생] " + finalI);
+                    e.printStackTrace();
+                }
+            });
+        }
+
+        return ResponseEntity.ok(" 가상 스레드 요청 전송 완료");
+    }
+}
+```
+
+```java
+@RestController
+class DelayServerController {
+    @GetMapping("/delay")
+    public String delay() throws InterruptedException {
+        Thread.sleep(100); // 3초 지연
+        return "Done";
+    }
+}
+```
+
+Artillery로 실행한 스크립트는 아래와 같다.
+```
+config:
+  target: "http://localhost:1010"
+  phases:
+    - duration: 100
+      arrivalRate: 10
+scenarios:
+  - name: "Virtual Thread Test with System Stats"
+    flow:
+      - get:
+          url: "/test-non-blocking"
+```
+
+```
+config:
+  target: "http://localhost:1010"
+  phases:
+    - duration: 100
+      arrivalRate: 10
+scenarios:
+  - name: "Virtual Thread Test with System Stats"
+    flow:
+      - get:
+          url: "/test-virtual-thread"
+```
+
+#### 실행 결과
+메모리 사용률은 Heap Used로 비교했는데 그 중 최대값
+- 가상 스레드 : 89Mib
+- 논블러킹 IO : 79Mib
+
+생성한 스레드 
+- 가상 스레드 : 여러개의 플랫폼 스레드를 만들었다. 해당 코드에서는 플랫폼 스레드로 HttpClient-1-Worker류의 스레드를 여러개 생성 했다. 최대 92번까지 생성했다.
+- 논블러킹 IO: reactor-http-nio-1만 사용해서 처리했다.
