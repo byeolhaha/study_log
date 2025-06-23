@@ -393,7 +393,7 @@ scenarios:
     - 위 코드는 블로킹 IO 연산이 있어서 해당 연산을 별도의 스레드 풀로 분리하였다. 그랬더니 아래와 같이 별도의 스레드 풀이 생성된 것을 확인할 수 있다.
       ![image](https://github.com/user-attachments/assets/20e69525-a90a-4ab0-9369-8e0fa4e0dcd4)
 
-  - 그런데 막상 before와 after작업의 p99는 오히려 별도의 스레드 풀을 만들지 않은 before가 더 낮게 측정되었다.
+  - 부하테스트틑 진행하였다. 
     - 부하테스트 스크립트
        ```java
        config:
