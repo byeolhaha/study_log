@@ -336,5 +336,87 @@ scenarios:
 - 논블러킹 IO : 79Mib
 
 생성한 스레드 
-- 가상 스레드 : 여러개의 플랫폼 스레드를 만들었다. 해당 코드에서는 플랫폼 스레드로 HttpClient-1-Worker류의 스레드를 여러개 생성 했다. 최대 92번까지 생성했다.
-- 논블러킹 IO: reactor-http-nio-1만 사용해서 처리했다.
+- 가상 스레드 : 여러개(약 세자리수까지)의 플랫폼 스레드를 만들었다. 해당 코드에서는 플랫폼 스레드로 HttpClient-1-Worker류의 스레드를 여러개 생성 했다. 최대 92번까지 생성했다.
+- 논블러킹 IO: 소수의 reactor-http-nio류만 만들어 사용해서 처리했다. 아래 사진은 100개 이벤트만 보여줘서 1만 나와있는데 실제로는 6이내까지 만들었다. 
+![image](https://github.com/user-attachments/assets/b5efc6c7-d9f0-4404-a0e3-92ae04c28ba8)
+
+### 리액터 패턴
+- 논블러킹 IO를 이용해서 구현할 때 사용하는 패턴 중 하나
+- 동시에 들어오는 여러 이벤트를 처리하기 위한 이벤트 처리 방법이다. 리액터 패턴은 크게 리액터와 핸들러 두 요소로 구성된다.
+- 리액터는 이벤트까 발생할 때까지 대기하다가 이벤트가 발생하면 알맞는 헨들러에 이벤트를 전달한다. 이벤트를 받은 헨들러는 필요한 로직을 수행한다.
+   ```java
+   while(running) { // 이벤트 루프 
+     List<Event> events = getEvents(); // 이벤트가 발생할 때까지 대기
+     for(Event event : events) {
+       Handler handler = getHandler(event);// 이벤트를 처리할 핸들러를 구한다.
+       handler.handle(event);
+     }
+   }
+   ```
+- 해당 이벤트 루프는 단일 스레드로 실행된다. 따라서 멀티 코어를 가진 서버에서 단일 스레드만을 사용하면 처리량을 최대한 낼 수 없다. 또 핸들러에서 CPU 연산이나 블로킹을 유발하는 연산을 수행하면 그 시간만큼 전체 이벤트 처리 시간이 지연된다.
+- 그러나 Reactor Netty는 HttpClient 혹은 HttpServer를 만들 때 내부적으로 Netty의 NioEventLoopGroup을 사용하며, 이 이벤트 루프 그룹은 기본적으로 Runtime.getRuntime().availableProcessors() 수만큼의 스레드를 생성한다고 한다. 그냥 쉽게 말해서 알아서 코어를 잘 사용하도록 유동적으로 증가시키는 거 같다.
+- 이러한 한계를 보완하기 위해서 핸들러나 블로킹 연산을 별도의 스레드 풀에서 실행하기도 한다.
+  - before
+     ```java
+         @GetMapping("/test-non-blocking")
+    public ResponseEntity<String> testNonBlocking() {
+        for (int i = 0; i < 100; i++) {
+            int finalI = i;
+            webClient.get()
+                    .uri("/delay")
+                    .retrieve()
+                    .bodyToMono(String.class)
+                    .doOnNext(res -> System.out.println("[WebClient] " + finalI + " => " + Thread.currentThread().getName()))
+                    .subscribe();
+        }
+        return ResponseEntity.ok("✅ WebClient 요청 전송 완료");
+    }
+     ```
+     ![image](https://github.com/user-attachments/assets/b5efc6c7-d9f0-4404-a0e3-92ae04c28ba8)
+  - after
+    ```java
+        @GetMapping("/test-non-blocking")
+    public ResponseEntity<String> testNonBlocking() {
+        for (int i = 0; i < 100; i++) {
+            int finalI = i;
+            webClient.get()
+                    .uri("/delay")
+                    .retrieve()
+                    .bodyToMono(String.class)
+                    .publishOn(Schedulers.boundedElastic())//추가 코드
+                    .doOnNext(res -> System.out.println("[WebClient] " + finalI + " => " + Thread.currentThread().getName()))
+                    .subscribe();
+        }
+        return ResponseEntity.ok("✅ WebClient 요청 전송 완료");
+    }
+    ```
+    - 위 코드는 블로킹 IO 연산이 있어서 해당 연산을 별도의 스레드 풀로 분리하였다. 그랬더니 아래와 같이 별도의 스레드 풀이 생성된 것을 확인할 수 있다.
+      ![image](https://github.com/user-attachments/assets/20e69525-a90a-4ab0-9369-8e0fa4e0dcd4)
+
+  - 그런데 막상 before와 after작업의 p99는 오히려 별도의 스레드 풀을 만들지 않은 before가 더 낮게 측정되었다.
+    - 부하테스트 스크립트
+       ```java
+       config:
+         target: "http://localhost:1010"
+           phases:
+             - duration: 100
+               arrivalRate: 10
+       scenarios:
+         - name: "Virtual Thread Test with System Stats"
+           flow:
+             - get:
+                 url: "/test-non-blocking"
+       ```
+    - 결과
+      - before : 별도 스레드 풀을 만들지 않은
+         - p99 : 12.1ms
+       - after : 별도 스레드 풀을 만든
+         - p99 : 10ms
+    - 별도의 스레드 풀에 대한 고찰
+      - 일단 이 스레드 풀을 만든다는 것은 무거운 작업을 위임한다는 것인데 이 스레드 풀에 대한 관리도 필요해보인다.
+      - 아래 이미지를 보면 별도의 스레드 풀이 sleep 상태로 있는 경우가 대부분이나 만약에 block이나 wait등의 상태가 발생하지는 않는지 관찰할 필요성이 있어보인다.
+      - 하여튼 별도의 스레드 풀조차 만능은 아니어서 관리가 필요할 거 같다.
+      - ![image](https://github.com/user-attachments/assets/c4153a99-7a7f-4f1c-9608-d61f36f88ce6)
+
+### 논블러킹/비동기 Io와 성능
+
